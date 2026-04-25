@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,9 @@ ORIGIN = "https://tickets.sagradafamilia.org"
 
 POS_ID = "649"
 SALES_GROUP_ID = "1"
-PRODUCT_ID = "4375"
 API_KEY = "thesagradafamiliafrontendoftomorrow"
+TIME_ZONE = "Europe/Madrid"
+DETECTION_TIME_ZONE = "America/New_York"
 
 DEFAULT_STATE = Path("sagrada_state.json")
 DEFAULT_CONFIG = Path("sagrada_config.json")
@@ -74,13 +76,14 @@ def request_json(
     method: str = "GET",
     token: str | None = None,
     transport: str = "auto",
+    referer: str = TICKET_URL,
 ) -> Any:
     headers = {
         "Accept": "application/json",
         "Accept-Language": "en",
         "Content-Type": "application/json",
         "Origin": ORIGIN,
-        "Referer": TICKET_URL,
+        "Referer": referer,
         "User-Agent": "sagrada-ticket-notifier/1.0",
     }
     if token:
@@ -118,10 +121,10 @@ def get_token(transport: str) -> str:
     return token
 
 
-def fetch_product(token: str, transport: str) -> dict[str, Any]:
-    url = f"{CATALOG_URL}/salesGroups/{SALES_GROUP_ID}/product/{PRODUCT_ID}/views/loyalty"
-    product = request_json(url, token=token, transport=transport)
-    if not isinstance(product, dict) or product.get("productId") != int(PRODUCT_ID):
+def fetch_product(token: str, product_id: str, ticket_url: str, transport: str) -> dict[str, Any]:
+    url = f"{CATALOG_URL}/salesGroups/{SALES_GROUP_ID}/product/{product_id}/views/loyalty"
+    product = request_json(url, token=token, transport=transport, referer=ticket_url)
+    if not isinstance(product, dict) or product.get("productId") != int(product_id):
         raise NotifierError(f"Unexpected product response: {product}")
     return product
 
@@ -132,6 +135,8 @@ def fetch_availability_month(
     *,
     venue_id: int,
     min_tickets: int,
+    product_id: str,
+    ticket_url: str,
     transport: str,
 ) -> dict[str, str]:
     params = urllib.parse.urlencode(
@@ -142,11 +147,57 @@ def fetch_availability_month(
             "minTickets": min_tickets,
         }
     )
-    url = f"{CATALOG_URL}/salesGroups/{SALES_GROUP_ID}/product/{PRODUCT_ID}/availability?{params}"
-    payload = request_json(url, token=token, transport=transport)
+    url = f"{CATALOG_URL}/salesGroups/{SALES_GROUP_ID}/product/{product_id}/availability?{params}"
+    payload = request_json(url, token=token, transport=transport, referer=ticket_url)
     if not isinstance(payload, dict):
         raise NotifierError(f"Unexpected availability response for {month:%Y-%m}: {payload}")
     return {str(date): str(status) for date, status in payload.items()}
+
+
+def fetch_event_times(
+    token: str,
+    date: str,
+    *,
+    product_id: str,
+    venue_id: int,
+    ticket_url: str,
+    transport: str,
+) -> list[str]:
+    params = urllib.parse.urlencode(
+        {
+            "salesGroupId": SALES_GROUP_ID,
+            "productId": product_id,
+            "venueId": venue_id,
+            "startDateFrom": f"{date} 00:00",
+            "startDateTo": f"{date} 23:59",
+            "timeZone": TIME_ZONE,
+        }
+    )
+    url = f"{CATALOG_URL}/events/available?{params}"
+    try:
+        payload = request_json(url, token=token, transport=transport, referer=ticket_url)
+    except NotifierError as exc:
+        print(f"Could not fetch event times for {product_id} on {date}: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(payload, list):
+        message = payload.get("message") if isinstance(payload, dict) else payload
+        print(f"Event times unavailable for {product_id} on {date}: {message}", file=sys.stderr)
+        return []
+
+    times = []
+    for event in payload:
+        start = event.get("startDatetime") if isinstance(event, dict) else None
+        if not start:
+            continue
+        try:
+            parsed = dt.datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(ZoneInfo(TIME_ZONE))
+            times.append(parsed.strftime("%H:%M"))
+        except ValueError:
+            if len(str(start)) >= 16:
+                times.append(str(start)[11:16])
+    return sorted(set(times))
 
 
 def post_pushover(
@@ -155,6 +206,7 @@ def post_pushover(
     pushover: dict[str, Any],
     *,
     transport: str,
+    ticket_url: str,
 ) -> None:
     app_token = pushover.get("app_token") or os.environ.get("PUSHOVER_APP_TOKEN")
     user_key = pushover.get("user_key") or os.environ.get("PUSHOVER_USER_KEY")
@@ -166,7 +218,7 @@ def post_pushover(
         "user": user_key,
         "title": title,
         "message": message,
-        "url": TICKET_URL,
+        "url": ticket_url,
         "url_title": "Open Sagrada Familia tickets",
     }
     for optional_key in ("priority", "sound", "device"):
@@ -210,9 +262,10 @@ def notify(
     no_desktop: bool,
     pushover: dict[str, Any],
     transport: str,
+    ticket_url: str,
 ) -> None:
     print(f"\n{title}\n{message}\a", flush=True)
-    post_pushover(title, message, pushover, transport=transport)
+    post_pushover(title, message, pushover, transport=transport, ticket_url=ticket_url)
     if no_desktop or sys.platform != "darwin":
         return
     script = (
@@ -252,20 +305,66 @@ def selected_watch_dates(args: argparse.Namespace, config: dict[str, Any]) -> se
     return {parse_date(date).isoformat() for date in dates}
 
 
-def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
-    checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-    token = get_token(args.transport)
-    product = fetch_product(token, args.transport)
-    venue_id = int(config.get("venue_id") or product["productVenueSet"][0]["venueId"])
-    watched = selected_watch_dates(args, config)
+def get_products(config: dict[str, Any]) -> list[dict[str, Any]]:
+    products = config.get("products")
+    if products:
+        return products
+    return [
+        {
+            "key": "standard",
+            "label": "Sagrada Familia",
+            "product_id": str(config.get("product_id") or "4375"),
+            "ticket_url": config.get("ticket_url") or TICKET_URL,
+            "venue_id": config.get("venue_id"),
+            "watch_dates": config.get("watch_dates", []),
+            "message_prefix": config.get("message_prefix") or "New Sagrada tickets available",
+        }
+    ]
+
+
+def format_detection_time(checked_at: dt.datetime) -> str:
+    return checked_at.astimezone(ZoneInfo(DETECTION_TIME_ZONE)).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def build_reopened_message(
+    prefix: str,
+    date: str,
+    *,
+    detected_at: str,
+    event_times: list[str],
+) -> str:
+    line = f"{prefix} on {date} at {detected_at}"
+    if event_times:
+        line += f"\nTicket times: {', '.join(event_times)} {TIME_ZONE}"
+    return line
+
+
+def check_product(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    product_config: dict[str, Any],
+    token: str,
+    checked_at: dt.datetime,
+    state: dict[str, Any],
+) -> tuple[str, dict[str, Any], bool]:
+    product_id = str(product_config["product_id"])
+    key = str(product_config.get("key") or product_id)
+    ticket_url = product_config.get("ticket_url") or TICKET_URL
+    product = fetch_product(token, product_id, ticket_url, args.transport)
+    venue_id = int(product_config.get("venue_id") or product["productVenueSet"][0]["venueId"])
+    watched = selected_watch_dates(args, {**config, **product_config})
     watched_dates = sorted(parse_date(date) for date in watched)
     start_date = args.start_date or (
-        watched_dates[0] if watched_dates else parse_date(config.get("start_date") or dt.date.today().isoformat())
+        watched_dates[0]
+        if watched_dates
+        else parse_date(product_config.get("start_date") or config.get("start_date") or dt.date.today().isoformat())
     )
     end_date = args.end_date or (
-        watched_dates[-1] if watched_dates else choose_end_date(product, config.get("end_date"))
+        watched_dates[-1]
+        if watched_dates
+        else choose_end_date(product, product_config.get("end_date") or config.get("end_date"))
     )
-    min_tickets = int(args.min_tickets or config.get("min_tickets") or 1)
+    min_tickets = int(args.min_tickets or product_config.get("min_tickets") or config.get("min_tickets") or 1)
 
     if end_date < start_date:
         raise NotifierError(f"End date {end_date} is before start date {start_date}")
@@ -278,6 +377,8 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
                 month,
                 venue_id=venue_id,
                 min_tickets=min_tickets,
+                product_id=product_id,
+                ticket_url=ticket_url,
                 transport=args.transport,
             )
         )
@@ -288,8 +389,10 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
         if start_date <= dt.date.fromisoformat(date) <= end_date and (not watched or date in watched)
     }
 
-    state = load_json(args.state, {})
-    previous = state.get("statuses", {})
+    previous = state.get("products", {}).get(key, {}).get("statuses")
+    if previous is None and key == "standard":
+        previous = state.get("statuses", {})
+    previous = previous or {}
     first_run = not previous
 
     reopened = sorted(
@@ -303,57 +406,107 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
         if status == "no-availability" and previous.get(date) == "availability"
     )
 
-    save_json(
-        args.state,
-        {
-            "checked_at": dt.datetime.now().isoformat(timespec="seconds"),
-            "checked_at_utc": checked_at.isoformat().replace("+00:00", "Z"),
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "min_tickets": min_tickets,
-            "statuses": current,
-        },
-    )
-
     available_count = sum(1 for status in current.values() if status == "availability")
     sold_out_count = sum(1 for status in current.values() if status == "no-availability")
     print(
-        f"Checked {len(current)} dates ({available_count} available, {sold_out_count} sold out) "
+        f"Checked {product_config.get('label') or key}: "
+        f"{len(current)} dates ({available_count} available, {sold_out_count} sold out) "
         f"from {start_date} to {end_date}."
     )
+    product_state = {
+        "checked_at_utc": checked_at.isoformat().replace("+00:00", "Z"),
+        "product_id": product_id,
+        "venue_id": venue_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "min_tickets": min_tickets,
+        "statuses": current,
+    }
 
     if first_run:
         sold_out = sorted(date for date, status in current.items() if status == "no-availability")
-        print(f"Initial baseline saved. Sold-out dates being watched: {', '.join(sold_out) or 'none'}.")
+        print(f"Initial baseline saved for {key}. Sold-out dates being watched: {', '.join(sold_out) or 'none'}.")
         if args.notify_current:
             available = sorted(date for date, status in current.items() if status == "availability")
             if available:
+                detected_at = format_detection_time(checked_at)
+                message = "\n\n".join(
+                    build_reopened_message(
+                        product_config.get("message_prefix") or "New Sagrada tickets available",
+                        date,
+                        detected_at=detected_at,
+                        event_times=fetch_event_times(
+                            token,
+                            date,
+                            product_id=product_id,
+                            venue_id=venue_id,
+                            ticket_url=ticket_url,
+                            transport=args.transport,
+                        ),
+                    )
+                    for date in available
+                )
                 notify(
-                    "Sagrada Familia tickets available",
-                    f"{', '.join(available)}\nDetected at {checked_at.isoformat().replace('+00:00', 'Z')}",
+                    product_config.get("notification_title") or "Sagrada tickets available",
+                    message,
                     no_desktop=args.no_desktop,
                     pushover=config.get("pushover", {}),
                     transport=args.transport,
+                    ticket_url=ticket_url,
                 )
-                return True
-        return False
+                return key, product_state, True
+        return key, product_state, False
 
     if reopened:
-        lines = [f"{date} is now {status_label(current.get(date))}" for date in reopened]
-        lines.append(f"Detected at {checked_at.isoformat().replace('+00:00', 'Z')}")
+        detected_at = format_detection_time(checked_at)
+        lines = [
+            build_reopened_message(
+                product_config.get("message_prefix") or "New Sagrada tickets available",
+                date,
+                detected_at=detected_at,
+                event_times=fetch_event_times(
+                    token,
+                    date,
+                    product_id=product_id,
+                    venue_id=venue_id,
+                    ticket_url=ticket_url,
+                    transport=args.transport,
+                ),
+            )
+            for date in reopened
+        ]
         notify(
-            "Sagrada Familia tickets reopened",
+            product_config.get("notification_title") or "Sagrada tickets available",
             "\n".join(lines),
             no_desktop=args.no_desktop,
             pushover=config.get("pushover", {}),
             transport=args.transport,
+            ticket_url=ticket_url,
         )
-        return True
+        return key, product_state, True
 
     if newly_sold_out:
-        print("Newly sold out:", ", ".join(newly_sold_out))
-    print("No watched sold-out dates reopened.")
-    return False
+        print(f"Newly sold out for {key}:", ", ".join(newly_sold_out))
+    print(f"No watched sold-out dates reopened for {key}.")
+    return key, product_state, False
+
+
+def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    token = get_token(args.transport)
+    state = load_json(args.state, {})
+    next_state = {
+        "checked_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "checked_at_utc": checked_at.isoformat().replace("+00:00", "Z"),
+        "products": dict(state.get("products", {})),
+    }
+    notified = False
+    for product_config in get_products(config):
+        key, product_state, product_notified = check_product(args, config, product_config, token, checked_at, state)
+        next_state["products"][key] = product_state
+        notified = notified or product_notified
+    save_json(args.state, next_state)
+    return notified
 
 
 def main() -> int:

@@ -77,7 +77,22 @@ For hosted monitoring, edit [sagrada_config.actions.json](sagrada_config.actions
 {
   "interval_seconds": 300,
   "min_tickets": 2,
-  "watch_dates": ["2026-05-15", "2026-05-10"],
+  "products": [
+    {
+      "key": "standard",
+      "product_id": "4375",
+      "venue_id": 1,
+      "message_prefix": "New Sagrada tickets available",
+      "watch_dates": ["2026-05-01", "2026-05-02"]
+    },
+    {
+      "key": "guided",
+      "product_id": "4374",
+      "venue_id": 1640,
+      "message_prefix": "New guided Sagrada tickets available",
+      "watch_dates": ["2026-05-01", "2026-05-02"]
+    }
+  ],
   "pushover": {}
 }
 ```
@@ -90,6 +105,14 @@ PUSHOVER_USER_KEY
 ```
 
 The workflow in `.github/workflows/sagrada-notifier.yml` runs every five minutes and stores `sagrada_state.actions.json` in the GitHub Actions cache so it only notifies when a watched date flips from sold out to available. You can also run it manually from the Actions tab.
+
+Pushover messages look like:
+
+```text
+New Sagrada tickets available on 2026-05-01 at 2026-04-25 00:12 EDT
+```
+
+The script also tries to fetch ticket-entry times for reopened dates and includes them as `Ticket times: ... Europe/Madrid` if the ticket API returns them.
 
 ## Useful Commands
 
