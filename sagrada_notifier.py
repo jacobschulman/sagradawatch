@@ -253,6 +253,7 @@ def selected_watch_dates(args: argparse.Namespace, config: dict[str, Any]) -> se
 
 
 def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     token = get_token(args.transport)
     product = fetch_product(token, args.transport)
     venue_id = int(config.get("venue_id") or product["productVenueSet"][0]["venueId"])
@@ -306,6 +307,7 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
         args.state,
         {
             "checked_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "checked_at_utc": checked_at.isoformat().replace("+00:00", "Z"),
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "min_tickets": min_tickets,
@@ -328,7 +330,7 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
             if available:
                 notify(
                     "Sagrada Familia tickets available",
-                    ", ".join(available),
+                    f"{', '.join(available)}\nDetected at {checked_at.isoformat().replace('+00:00', 'Z')}",
                     no_desktop=args.no_desktop,
                     pushover=config.get("pushover", {}),
                     transport=args.transport,
@@ -338,6 +340,7 @@ def check_once(args: argparse.Namespace, config: dict[str, Any]) -> bool:
 
     if reopened:
         lines = [f"{date} is now {status_label(current.get(date))}" for date in reopened]
+        lines.append(f"Detected at {checked_at.isoformat().replace('+00:00', 'Z')}")
         notify(
             "Sagrada Familia tickets reopened",
             "\n".join(lines),
