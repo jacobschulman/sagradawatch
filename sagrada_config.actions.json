@@ -1,0 +1,8 @@
+{
+  "interval_seconds": 300,
+  "min_tickets": 1,
+  "watch_dates": [
+    "2026-05-15"
+  ],
+  "pushover": {}
+}

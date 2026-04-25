@@ -1,0 +1,10 @@
+{
+  "interval_seconds": 300,
+  "min_tickets": 1,
+  "watch_dates": ["2026-04-26", "2026-04-27"],
+  "pushover": {
+    "app_token": "put-your-pushover-app-token-here",
+    "user_key": "put-your-pushover-user-key-here",
+    "sound": "pushover"
+  }
+}

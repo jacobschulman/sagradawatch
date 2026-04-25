@@ -1,0 +1,54 @@
+name: Sagrada Familia Notifier
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: sagrada-notifier
+  cancel-in-progress: false
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Restore notifier state
+        uses: actions/cache/restore@v4
+        with:
+          path: sagrada_state.actions.json
+          key: sagrada-state-${{ github.run_id }}
+          restore-keys: |
+            sagrada-state-
+
+      - name: Check configured dates
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          python3 sagrada_notifier.py \
+            --once \
+            --config sagrada_config.actions.json \
+            --state sagrada_state.actions.json \
+            --no-desktop
+
+      - name: Save notifier state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: sagrada_state.actions.json
+          key: sagrada-state-${{ github.run_id }}
