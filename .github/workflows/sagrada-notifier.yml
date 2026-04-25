@@ -22,6 +22,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Stop after watch window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(date -u +%F)" > "2026-05-05" ]]; then
+            echo "Watch window ended after 2026-05-05. Disabling this workflow."
+            gh workflow disable sagrada-notifier.yml
+            exit 0
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
