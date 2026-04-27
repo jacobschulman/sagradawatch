@@ -227,12 +227,15 @@ def probe_ticket_quantities(
 
 
 def summarize_quantity_probe(statuses: dict[int, str]) -> str:
+    max_available = max_available_quantity(statuses)
+    if max_available < 1:
+        return "available quantity could not be confirmed"
+    return f"available for at least {max_available} tickets"
+
+
+def max_available_quantity(statuses: dict[int, str]) -> int:
     available_quantities = [quantity for quantity, status in statuses.items() if status == "availability"]
-    if not available_quantities:
-        return "Calendar quantity check: not available for probed quantities"
-    max_available = max(available_quantities)
-    details = ", ".join(f"{quantity}: {status}" for quantity, status in statuses.items())
-    return f"Calendar quantity check: available for at least {max_available} ticket(s) ({details})"
+    return max(available_quantities) if available_quantities else 0
 
 
 def confirm_reopened_dates(
@@ -399,14 +402,9 @@ def build_reopened_message(
     quantity_probe: dict[int, str],
     confirmation_delay: int,
 ) -> str:
-    line = f"{prefix} on {date} at {detected_at}"
-    if confirmation_delay > 0:
-        line += f"\nConfirmed after {confirmation_delay}s re-check"
-    line += f"\n{summarize_quantity_probe(quantity_probe)}"
+    line = f"{prefix} on {date} at {detected_at} - {summarize_quantity_probe(quantity_probe)}"
     if event_times:
         line += f"\nTicket times: {', '.join(event_times)} {TIME_ZONE}"
-    else:
-        line += "\nTicket times: unavailable from calendar API"
     return line
 
 
@@ -437,6 +435,7 @@ def check_product(
     )
     min_tickets = int(args.min_tickets or product_config.get("min_tickets") or config.get("min_tickets") or 1)
     max_ticket_probe = int(product_config.get("max_ticket_probe") or config.get("max_ticket_probe") or 6)
+    min_notify_tickets = int(product_config.get("min_notify_tickets") or config.get("min_notify_tickets") or 2)
     confirmation_delay = int(product_config.get("confirmation_delay_seconds") or config.get("confirmation_delay_seconds") or 0)
 
     if end_date < start_date:
@@ -517,32 +516,40 @@ def check_product(
                 if not available:
                     return key, product_state, False
                 detected_at = format_detection_time(checked_at)
-                message = "\n\n".join(
-                    build_reopened_message(
-                        product_config.get("message_prefix") or "New Sagrada tickets available",
+                messages = []
+                for date in available:
+                    quantity_probe = probe_ticket_quantities(
+                        token,
                         date,
-                        detected_at=detected_at,
-                        quantity_probe=probe_ticket_quantities(
-                            token,
-                            date,
-                            product_id=product_id,
-                            venue_id=venue_id,
-                            ticket_url=ticket_url,
-                            max_tickets=max_ticket_probe,
-                            transport=args.transport,
-                        ),
-                        confirmation_delay=confirmation_delay,
-                        event_times=fetch_event_times(
-                            token,
-                            date,
-                            product_id=product_id,
-                            venue_id=venue_id,
-                            ticket_url=ticket_url,
-                            transport=args.transport,
-                        ),
+                        product_id=product_id,
+                        venue_id=venue_id,
+                        ticket_url=ticket_url,
+                        max_tickets=max_ticket_probe,
+                        transport=args.transport,
                     )
-                    for date in available
-                )
+                    if max_available_quantity(quantity_probe) < min_notify_tickets:
+                        print(f"Skipped notification for {product_id} on {date}: fewer than {min_notify_tickets} tickets confirmed.")
+                        continue
+                    messages.append(
+                        build_reopened_message(
+                            product_config.get("message_prefix") or "New Sagrada tickets available",
+                            date,
+                            detected_at=detected_at,
+                            quantity_probe=quantity_probe,
+                            confirmation_delay=confirmation_delay,
+                            event_times=fetch_event_times(
+                                token,
+                                date,
+                                product_id=product_id,
+                                venue_id=venue_id,
+                                ticket_url=ticket_url,
+                                transport=args.transport,
+                            ),
+                        )
+                    )
+                if not messages:
+                    return key, product_state, False
+                message = "\n".join(messages)
                 notify(
                     product_config.get("notification_title") or "Sagrada tickets available",
                     message,
@@ -570,32 +577,39 @@ def check_product(
         if not reopened:
             return key, product_state, False
         detected_at = format_detection_time(checked_at)
-        lines = [
-            build_reopened_message(
-                product_config.get("message_prefix") or "New Sagrada tickets available",
+        lines = []
+        for date in reopened:
+            quantity_probe = probe_ticket_quantities(
+                token,
                 date,
-                detected_at=detected_at,
-                quantity_probe=probe_ticket_quantities(
-                    token,
-                    date,
-                    product_id=product_id,
-                    venue_id=venue_id,
-                    ticket_url=ticket_url,
-                    max_tickets=max_ticket_probe,
-                    transport=args.transport,
-                ),
-                confirmation_delay=confirmation_delay,
-                event_times=fetch_event_times(
-                    token,
-                    date,
-                    product_id=product_id,
-                    venue_id=venue_id,
-                    ticket_url=ticket_url,
-                    transport=args.transport,
-                ),
+                product_id=product_id,
+                venue_id=venue_id,
+                ticket_url=ticket_url,
+                max_tickets=max_ticket_probe,
+                transport=args.transport,
             )
-            for date in reopened
-        ]
+            if max_available_quantity(quantity_probe) < min_notify_tickets:
+                print(f"Skipped notification for {product_id} on {date}: fewer than {min_notify_tickets} tickets confirmed.")
+                continue
+            lines.append(
+                build_reopened_message(
+                    product_config.get("message_prefix") or "New Sagrada tickets available",
+                    date,
+                    detected_at=detected_at,
+                    quantity_probe=quantity_probe,
+                    confirmation_delay=confirmation_delay,
+                    event_times=fetch_event_times(
+                        token,
+                        date,
+                        product_id=product_id,
+                        venue_id=venue_id,
+                        ticket_url=ticket_url,
+                        transport=args.transport,
+                    ),
+                )
+            )
+        if not lines:
+            return key, product_state, False
         notify(
             product_config.get("notification_title") or "Sagrada tickets available",
             "\n".join(lines),

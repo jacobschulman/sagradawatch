@@ -2,6 +2,7 @@
   "interval_seconds": 300,
   "min_tickets": 1,
   "max_ticket_probe": 6,
+  "min_notify_tickets": 2,
   "confirmation_delay_seconds": 20,
   "products": [
     {
