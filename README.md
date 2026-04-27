@@ -77,6 +77,8 @@ For hosted monitoring, edit [sagrada_config.actions.json](sagrada_config.actions
 {
   "interval_seconds": 300,
   "min_tickets": 2,
+  "max_ticket_probe": 6,
+  "confirmation_delay_seconds": 20,
   "products": [
     {
       "key": "standard",
@@ -110,6 +112,8 @@ Pushover messages look like:
 
 ```text
 New Sagrada tickets available on 2026-05-01 at 2026-04-25 00:12 EDT
+Confirmed after 20s re-check
+Calendar quantity check: available for at least 3 ticket(s) (1: availability, 2: availability, 3: availability, 4: no-availability, 5: no-availability, 6: no-availability)
 ```
 
 The script also tries to fetch ticket-entry times for reopened dates and includes them as `Ticket times: ... Europe/Madrid` if the ticket API returns them.

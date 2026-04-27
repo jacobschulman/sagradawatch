@@ -1,6 +1,8 @@
 {
   "interval_seconds": 300,
   "min_tickets": 1,
+  "max_ticket_probe": 6,
+  "confirmation_delay_seconds": 20,
   "products": [
     {
       "key": "standard",

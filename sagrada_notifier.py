@@ -200,6 +200,70 @@ def fetch_event_times(
     return sorted(set(times))
 
 
+def probe_ticket_quantities(
+    token: str,
+    date: str,
+    *,
+    product_id: str,
+    venue_id: int,
+    ticket_url: str,
+    max_tickets: int,
+    transport: str,
+) -> dict[int, str]:
+    day = parse_date(date)
+    statuses: dict[int, str] = {}
+    for quantity in range(1, max_tickets + 1):
+        month_statuses = fetch_availability_month(
+            token,
+            day.replace(day=1),
+            venue_id=venue_id,
+            min_tickets=quantity,
+            product_id=product_id,
+            ticket_url=ticket_url,
+            transport=transport,
+        )
+        statuses[quantity] = month_statuses.get(date, "missing")
+    return statuses
+
+
+def summarize_quantity_probe(statuses: dict[int, str]) -> str:
+    available_quantities = [quantity for quantity, status in statuses.items() if status == "availability"]
+    if not available_quantities:
+        return "Calendar quantity check: not available for probed quantities"
+    max_available = max(available_quantities)
+    details = ", ".join(f"{quantity}: {status}" for quantity, status in statuses.items())
+    return f"Calendar quantity check: available for at least {max_available} ticket(s) ({details})"
+
+
+def confirm_reopened_dates(
+    token: str,
+    reopened: list[str],
+    *,
+    product_id: str,
+    venue_id: int,
+    ticket_url: str,
+    min_tickets: int,
+    transport: str,
+) -> list[str]:
+    confirmed = []
+    for date in reopened:
+        day = parse_date(date)
+        month_statuses = fetch_availability_month(
+            token,
+            day.replace(day=1),
+            venue_id=venue_id,
+            min_tickets=min_tickets,
+            product_id=product_id,
+            ticket_url=ticket_url,
+            transport=transport,
+        )
+        if month_statuses.get(date) == "availability":
+            confirmed.append(date)
+        else:
+            print(f"Skipped notification for {product_id} on {date}: no longer available on confirmation check.")
+    return confirmed
+
+
 def post_pushover(
     title: str,
     message: str,
@@ -332,10 +396,17 @@ def build_reopened_message(
     *,
     detected_at: str,
     event_times: list[str],
+    quantity_probe: dict[int, str],
+    confirmation_delay: int,
 ) -> str:
     line = f"{prefix} on {date} at {detected_at}"
+    if confirmation_delay > 0:
+        line += f"\nConfirmed after {confirmation_delay}s re-check"
+    line += f"\n{summarize_quantity_probe(quantity_probe)}"
     if event_times:
         line += f"\nTicket times: {', '.join(event_times)} {TIME_ZONE}"
+    else:
+        line += "\nTicket times: unavailable from calendar API"
     return line
 
 
@@ -365,6 +436,8 @@ def check_product(
         else choose_end_date(product, product_config.get("end_date") or config.get("end_date"))
     )
     min_tickets = int(args.min_tickets or product_config.get("min_tickets") or config.get("min_tickets") or 1)
+    max_ticket_probe = int(product_config.get("max_ticket_probe") or config.get("max_ticket_probe") or 6)
+    confirmation_delay = int(product_config.get("confirmation_delay_seconds") or config.get("confirmation_delay_seconds") or 0)
 
     if end_date < start_date:
         raise NotifierError(f"End date {end_date} is before start date {start_date}")
@@ -429,12 +502,36 @@ def check_product(
         if args.notify_current:
             available = sorted(date for date, status in current.items() if status == "availability")
             if available:
+                if confirmation_delay > 0:
+                    print(f"Waiting {confirmation_delay}s before confirmation check for {key}.")
+                    time.sleep(confirmation_delay)
+                    available = confirm_reopened_dates(
+                        token,
+                        available,
+                        product_id=product_id,
+                        venue_id=venue_id,
+                        ticket_url=ticket_url,
+                        min_tickets=min_tickets,
+                        transport=args.transport,
+                    )
+                if not available:
+                    return key, product_state, False
                 detected_at = format_detection_time(checked_at)
                 message = "\n\n".join(
                     build_reopened_message(
                         product_config.get("message_prefix") or "New Sagrada tickets available",
                         date,
                         detected_at=detected_at,
+                        quantity_probe=probe_ticket_quantities(
+                            token,
+                            date,
+                            product_id=product_id,
+                            venue_id=venue_id,
+                            ticket_url=ticket_url,
+                            max_tickets=max_ticket_probe,
+                            transport=args.transport,
+                        ),
+                        confirmation_delay=confirmation_delay,
                         event_times=fetch_event_times(
                             token,
                             date,
@@ -458,12 +555,36 @@ def check_product(
         return key, product_state, False
 
     if reopened:
+        if confirmation_delay > 0:
+            print(f"Waiting {confirmation_delay}s before confirmation check for {key}.")
+            time.sleep(confirmation_delay)
+            reopened = confirm_reopened_dates(
+                token,
+                reopened,
+                product_id=product_id,
+                venue_id=venue_id,
+                ticket_url=ticket_url,
+                min_tickets=min_tickets,
+                transport=args.transport,
+            )
+        if not reopened:
+            return key, product_state, False
         detected_at = format_detection_time(checked_at)
         lines = [
             build_reopened_message(
                 product_config.get("message_prefix") or "New Sagrada tickets available",
                 date,
                 detected_at=detected_at,
+                quantity_probe=probe_ticket_quantities(
+                    token,
+                    date,
+                    product_id=product_id,
+                    venue_id=venue_id,
+                    ticket_url=ticket_url,
+                    max_tickets=max_ticket_probe,
+                    transport=args.transport,
+                ),
+                confirmation_delay=confirmation_delay,
                 event_times=fetch_event_times(
                     token,
                     date,
